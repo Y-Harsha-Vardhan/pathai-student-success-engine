@@ -61,6 +61,7 @@ def load_data(data_dir='archive'):
 
     return df_vle, df_student_assess, df_assess, df_labels
 
+
 def feature_engineering(df_vle, df_student_assess, df_assess, df_labels):
     # compute behavioral features per (student, week)
     print("Engineering features...")
@@ -182,17 +183,158 @@ def apply_leakage_free_scaling(grid, feature_cols):
 
     return scaled_grid
 
-if __name__ == "__main__":
+
+def calculate_engagement_score(scaled_grid, df_labels, feature_cols):
+    # derive feature weights using Spearman correlation with the label
+    # average over weeks 4–6 since very early weeks were a bit noisy
+    print("Calculating data-driven weights...")
+
+    scaled_cols = [f'{c}_scaled' for c in feature_cols if f'{c}_scaled' in scaled_grid.columns]
+    data = pd.merge(scaled_grid, df_labels, on='id_student', how='inner')
+
+    correlations = {col: 0.0 for col in scaled_cols}
+    weight_weeks = [4, 5, 6]
+
+    for w in weight_weeks:
+        week_data = data[data['week'] == w]
+        if len(week_data) == 0:
+            continue
+
+        for col in scaled_cols:
+            corr, _ = spearmanr(week_data[col], week_data['label'])
+
+            # take absolute value — features are aligned so higher = more engagement
+            correlations[col] += abs(corr) if pd.notna(corr) else 0.0
+
+    # average across selected weeks
+    for col in scaled_cols:
+        correlations[col] /= len(weight_weeks)
+
+    total_corr = sum(correlations.values())
+    if total_corr == 0:
+        total_corr = 1e-9  # safety fallback
+
+    weights = {col: correlations[col] / total_corr for col in scaled_cols}
+
+    print("\n--- Learned Weights (Weeks 4-6 avg) ---")
+    for col, w in weights.items():
+        print(f"{col}: {w:.4f}")
+    print("---------------------------------------\n")
+
+    # weighted sum → scale to 0–100
+    data['engagement_score'] = sum(data[col] * weights[col] for col in scaled_cols)
+    data['engagement_score'] *= 100
+
+    return data
+
+
+def extract_and_visualize_archetypes(data):
+    # pick a few representative students and plot their trajectories
+    print("Extracting archetypes and generating visualization...")
+
+    stats = data.groupby('id_student')['engagement_score'].agg(['mean', 'std']).reset_index()
+
+    # just in case duplicates exist
+    data_deduped = data.groupby(['id_student', 'week'])['engagement_score'].mean().reset_index()
+    pivot = data_deduped.pivot(index='id_student', columns='week', values='engagement_score')
+
+    def safe_get_id(candidates, fallback_candidates, fallback_idx=0):
+        # helper to avoid empty selections
+        if not candidates.empty:
+            return candidates.index[0]
+        if not fallback_candidates.empty:
+            return fallback_candidates.index[0]
+        return pivot.index[fallback_idx]
+
+    selected_ids = set()
+    stats_indexed = stats.set_index('id_student')
+
+    # steady engager: high mean, low variance
+    steady_candidates = stats_indexed[stats_indexed['mean'] > 75].sort_values('std')
+    fallback_steady = stats_indexed.sort_values('mean', ascending=False)
+    steady_id = safe_get_id(steady_candidates, fallback_steady, 0)
+    selected_ids.add(steady_id)
+
+    # early dropout: good start, sharp drop
+    dropout_candidates = pivot[(pivot[1] > 60) & (pivot[2] > 60) & (pivot[5] < 20)]
+    fallback_dropout = pivot[(pivot[1] > 50) & (pivot[5] < 30)]
+    dropout_id = safe_get_id(
+        dropout_candidates[~dropout_candidates.index.isin(selected_ids)],
+        fallback_dropout[~fallback_dropout.index.isin(selected_ids)],
+        0
+    )
+    selected_ids.add(dropout_id)
+
+    # late recoverer: weak start, improves later
+    recoverer_candidates = pivot[(pivot[4] < 40) & (pivot[8] > 70)]
+    fallback_recoverer = pivot[(pivot[4] < 50) & (pivot[8] > 60)]
+    recoverer_id = safe_get_id(
+        recoverer_candidates[~recoverer_candidates.index.isin(selected_ids)],
+        fallback_recoverer[~fallback_recoverer.index.isin(selected_ids)],
+        -1
+    )
+
+    print(f"Archetypes -> Steady: {steady_id} | Dropout: {dropout_id} | Recoverer: {recoverer_id}")
+
+    sns.set_theme(style="whitegrid")
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    archetypes = [
+        (steady_id,    'Steady Engager',  '#2ca02c'),
+        (dropout_id,   'Early Dropout',   '#d62728'),
+        (recoverer_id, 'Late Recoverer',  '#1f77b4'),
+    ]
+
+    for student_id, label, color in archetypes:
+        student_data = data[data['id_student'] == student_id]
+        ax.plot(
+            student_data['week'], student_data['engagement_score'],
+            label=label, linewidth=2.5, color=color, marker='o'
+        )
+
+    ax.set_title('Engagement Trajectories', fontsize=15, fontweight='bold')
+    ax.set_xlabel('Week')
+    ax.set_ylabel('Engagement Score')
+    ax.set_ylim(-5, 105)
+    ax.set_xlim(0, 15)
+    ax.legend(loc='lower right')
+
+    plt.tight_layout()
+    out_path = 'engagement_archetypes.png'
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+
+    print(f"Saved plot to '{out_path}'.")
+
+
+def main():
     df_vle, df_student_assess, df_assess, df_labels = load_data('archive')
 
     grid = feature_engineering(df_vle, df_student_assess, df_assess, df_labels)
-    print("Feature grid shape:", grid.shape)
-    print(grid.head())
 
     feature_cols = [
-        'interaction_volume', 'session_regularity', 'activity_diversity',
-        'days_since_last_login', 'procrastination_index'
+        'interaction_volume',
+        'session_regularity',
+        'activity_diversity',
+        'days_since_last_login',
+        'procrastination_index',
     ]
-    scaled = apply_leakage_free_scaling(grid, feature_cols)
-    print("\nScaled sample:")
-    print(scaled[[c + '_scaled' for c in feature_cols]].describe())
+
+    scaled_grid = apply_leakage_free_scaling(grid, feature_cols)
+
+    # momentum = week-to-week change in interaction volume
+    scaled_grid = scaled_grid.sort_values(['id_student', 'week'])
+    momentum_raw = scaled_grid.groupby('id_student')['interaction_volume_scaled'].diff().fillna(0)
+
+    # map from [-1,1] → [0,1] so it fits with other features
+    scaled_grid['momentum_scaled'] = ((momentum_raw + 1.0) / 2.0).clip(0, 1)
+
+    feature_cols.append('momentum')
+
+    scored_data = calculate_engagement_score(scaled_grid, df_labels, feature_cols)
+
+    extract_and_visualize_archetypes(scored_data)
+
+
+if __name__ == "__main__":
+    main()
