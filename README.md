@@ -1,141 +1,86 @@
 # PathAI Student Success Engine
 
-An end-to-end learning analytics system that models student engagement, predicts early disengagement risk, and recommends personalized course pathways using behavioral and academic data.
+An end-to-end learning analytics system that models student engagement, predicts early disengagement risk, and recommends personalized course pathways using behavioral and academic data. 
+
+*Note: This repository is being built iteratively for the Studor DS Screening Project.*
 
 ---
 
 ## 📌 Overview
 
-This project is part of the Studor DS Screening Project. The objective is to design a system that could realistically be deployed within a university setting to:
-
-* Track and score student engagement over time
-* Predict disengagement risk early (before Week 6)
-* Recommend suitable courses for future semesters
-
-The system leverages behavioral clickstream data from the **OULAD dataset** (or equivalent).
-
----
-
-## 🚀 Features
-
-### 1. Behavioral Engagement Scoring
-
-* Dynamic engagement score (0–100)
-* Week-by-week trajectory tracking
-* Feature engineering from clickstream data (recency, frequency, activity patterns, etc.)
-* Student archetype analysis
-
-### 2. Disengagement Prediction
-
-* Binary classification model (withdraw/fail vs pass)
-* Early prediction using only Week ≤ 6 data
-* Evaluation using Precision, Recall, F1, ROC-AUC
-* Model calibration and feature importance analysis
-
-### 3. Course Recommendation Engine
-
-* Content-based recommendation system
-* Collaborative filtering approach
-* Cold-start handling strategy
-* Evaluation using ranking metrics
+This system is designed to be deployed within a university setting to:
+* **[Completed]** Track and score student engagement over time using behavioral clickstream data.
+* **[WIP]** Predict disengagement risk early (before Week 6).
+* **[WIP]** Recommend suitable courses for future semesters using a hybrid ensemble model.
 
 ---
 
 ## 📂 Project Structure
 
+```
 pathai-student-success-engine/
 │
-├── data/               # Raw and processed datasets
-├── notebooks/          # Exploratory analysis and prototyping
-├── src/                # Core source code
-│   ├── features/       # Feature engineering pipelines
-│   ├── models/         # Training and evaluation scripts
-│   ├── scoring/        # Engagement scoring logic
-│   └── recommend/      # Recommendation engine
-│
-├── outputs/            # Plots, results, and artifacts
-├── report/             # Final PDF report
-├── requirements.txt    # Dependencies
-└── README.md
-
+├── archive/                  # Raw OULAD dataset CSVs (Ignored in Git)
+├── student_engagement.py     # Task 1: Behavioral Scoring & Archetype pipeline
+├── requirements.txt          # Frozen Python dependencies
+├── .gitignore                # Git ignore rules
+└── README.md                 # Project documentation
+```
 ---
 
 ## ⚙️ Setup Instructions
 
-1. Clone the repository:
-
-```
-git clone https://github.com/<your-username>/pathai-student-success-engine.git
+**1. Clone the repository:**
+```bash
+git clone https://github.com/Y-Harsha-Vardhan/pathai-student-success-engine.git
 cd pathai-student-success-engine
 ```
 
-2. Create a virtual environment:
+**2. Create and activate a virtual environment:**
+```bash
+# Mac/Linux
+python3 -m venv venv
+source venv/bin/activate
 
-```
+# Windows
 python -m venv venv
-source venv/bin/activate   # Mac/Linux
-venv\Scripts\activate      # Windows
+venv\Scripts\activate
 ```
 
-3. Install dependencies:
-
-```
+**3. Install dependencies:**
+```bash
 pip install -r requirements.txt
 ```
 
----
-
-## 📊 Dataset
-
-* Primary: Open University Learning Analytics Dataset (OULAD)
-* Alternative: xAPI-Edu-Data
-
-Place datasets inside the `data/` directory before running scripts.
+**4. Dataset Placement:**
+Download the Open University Learning Analytics Dataset (OULAD) from Kaggle. Create a folder named `archive` in the root directory and place the extracted CSV files inside it.
+*Required files: `studentVle.csv`, `studentAssessment.csv`, `studentInfo.csv`, `assessments.csv`.*
 
 ---
 
-## 📈 Evaluation Metrics
+## 🚀 Usage 
 
-* Classification: Precision, Recall, F1-score, ROC-AUC
-* Calibration: Reliability analysis
-* Recommendation: Precision@K / Coverage
+### Task 1: Behavioral Scoring Framework
+To generate the dynamic engagement scores and extract the week-by-week trajectories for the student archetypes, run:
+```bash
+python student_engagement.py
+```
+**Outputs:** 
+* Prints the data-driven Spearman correlation weights to the terminal.
+* Generates `engagement_archetypes.png` in the root directory, visualizing the "Steady Engager", "Early Dropout", and "Late Recoverer" profiles.
 
 ---
 
 ## 🎯 Design Principles
 
-* No data leakage (strict temporal constraints)
-* Interpretability over complexity
-* Product-oriented outputs (actionable insights for staff)
-* Reproducibility and clean code
-
----
-
-## 📌 Deliverables
-
-* GitHub repository
-* PDF report (max 6 pages)
-* 10-minute walkthrough video
-
----
-
-## 🧠 Future Improvements
-
-* Real-time engagement tracking dashboard
-* Intervention recommendation system
-* Advanced sequence models for behavior modeling
-* A/B testing framework for recommendations
+* **No Data Leakage:** Strict implementation of expanding-window min-max scalers for time-series features.
+* **Interpretability:** Preference for data-driven, mathematically transparent weights over arbitrary assertions.
+* **Product-Oriented:** Outputs are designed to translate complex models into actionable, plain-English insights for university staff.
 
 ---
 
 ## 👤 Author
-
+```
 Harsha Vardhan
-IIT Bombay
-
----
-
-## 📄 License
-
-This project is for evaluation purposes only.
-
+B.Tech CSE, IIT Bombay
+```
