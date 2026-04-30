@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import spearmanr
 import os
-from sklearn.preprocessing import MinMaxScaler
+# sklearn MinMaxScaler removed: using custom expanding-window implementation for preventing leakage
 
 
 def load_data(data_dir='archive'):
@@ -61,8 +61,138 @@ def load_data(data_dir='archive'):
 
     return df_vle, df_student_assess, df_assess, df_labels
 
+def feature_engineering(df_vle, df_student_assess, df_assess, df_labels):
+    # compute behavioral features per (student, week)
+    print("Engineering features...")
+
+    # procrastination = how late/early a submission was relative to deadline
+    assess_merged = pd.merge(df_student_assess, df_assess, on='id_assessment', how='inner')
+
+    # quick sanity check: composite key should exist after merge
+    assert assess_merged['id_student'].str.contains('_').all(), "Composite ID issue after merge"
+
+    assess_merged['procrastination'] = assess_merged['date_submitted'] - assess_merged['date']
+
+    students = df_labels['id_student'].unique()
+
+    # create full (student x week) grid so we don't lose inactive weeks
+    min_week = int(min(df_vle['week'].min(), assess_merged['week'].min()))
+    max_week = int(max(df_vle['week'].max(), assess_merged['week'].max()))
+    weeks = range(min_week, max_week + 1)
+
+    grid = pd.MultiIndex.from_product(
+        [students, weeks], names=['id_student', 'week']
+    ).to_frame(index=False)
+
+    # - Feature 1: total clicks per week -
+    vol = df_vle.groupby(['id_student', 'week'])['sum_click'].sum().reset_index(name='interaction_volume')
+    grid = grid.merge(vol, on=['id_student', 'week'], how='left').fillna({'interaction_volume': 0})
+
+    # -- Feature 2: number of active days in the week --
+    reg = df_vle.groupby(['id_student', 'week'])['date'].nunique().reset_index(name='session_regularity')
+    grid = grid.merge(reg, on=['id_student', 'week'], how='left').fillna({'session_regularity': 0})
+
+    # --- Feature 3: how many different resources were accessed ---
+    div = df_vle.groupby(['id_student', 'week'])['id_site'].nunique().reset_index(name='activity_diversity')
+    grid = grid.merge(div, on=['id_student', 'week'], how='left').fillna({'activity_diversity': 0})
+
+    # ---- Feature 4: days since last login ----
+    # using merge_asof to avoid looping over students (much faster)
+    grid['week_start'] = grid['week'] * 7
+    df_vle_sorted = df_vle.dropna(subset=['date']).sort_values('date')
+    grid_sorted = grid.sort_values('week_start').reset_index()
+
+    last_login = pd.merge_asof(
+        grid_sorted[['index', 'id_student', 'week_start']],
+        df_vle_sorted[['id_student', 'date']],
+        by='id_student',
+        left_on='week_start',
+        right_on='date',
+        direction='backward'
+    )
+
+    last_login = last_login.set_index('index')
+    grid['max_date'] = last_login['date']
+
+    # if no previous login exists, treat as no gap
+    grid['max_date'] = grid['max_date'].fillna(grid['week_start'])
+    grid['days_since_last_login'] = grid['week_start'] - grid['max_date']
+    grid.drop(columns=['week_start', 'max_date'], inplace=True)
+
+    # ----- Feature 5: procrastination index -----
+    # carry forward last known value for weeks without submissions
+    proc = assess_merged.groupby(['id_student', 'week'])['procrastination'].mean().reset_index(
+        name='procrastination_index'
+    )
+    grid = grid.merge(proc, on=['id_student', 'week'], how='left')
+    grid['procrastination_index'] = (
+        grid.groupby('id_student')['procrastination_index'].ffill().fillna(0)
+    )
+
+    # restrict to standard semester window
+    grid = grid[(grid['week'] >= 0) & (grid['week'] <= 39)].copy()
+
+    return grid
+
+
+def apply_leakage_free_scaling(grid, feature_cols):
+    # scale features to [0,1] using only past + current data (no future leakage)
+    print("Applying leakage-free scaling...")
+
+    scaled_grid = grid.copy()
+    scaled_cols = [f'{c}_scaled' for c in feature_cols]
+
+    for col in scaled_cols:
+        scaled_grid[col] = 0.0
+
+    weeks = sorted(scaled_grid['week'].unique())
+
+    # keep track of running min/max
+    running_min = {}
+    running_max = {}
+
+    for t in weeks:
+        week_mask = scaled_grid['week'] == t
+        week_data = scaled_grid.loc[week_mask, feature_cols]
+
+        # update stats with current week
+        for col in feature_cols:
+            c_min = week_data[col].min()
+            c_max = week_data[col].max()
+
+            if not pd.isna(c_min):
+                running_min[col] = min(running_min.get(col, np.inf), c_min)
+            if not pd.isna(c_max):
+                running_max[col] = max(running_max.get(col, -np.inf), c_max)
+
+        # scale using stats seen so far
+        for i, col in enumerate(feature_cols):
+            col_min = running_min.get(col, 0)
+            col_max = running_max.get(col, 1)
+            denom = col_max - col_min
+
+            if denom == 0 or np.isinf(denom) or pd.isna(denom):
+                scaled_grid.loc[week_mask, scaled_cols[i]] = 0.0
+            else:
+                scaled_grid.loc[week_mask, scaled_cols[i]] = (week_data[col] - col_min) / denom
+
+    # flip features where higher = worse engagement
+    scaled_grid['days_since_last_login_scaled'] = 1.0 - scaled_grid['days_since_last_login_scaled']
+    scaled_grid['procrastination_index_scaled'] = 1.0 - scaled_grid['procrastination_index_scaled']
+
+    return scaled_grid
 
 if __name__ == "__main__":
     df_vle, df_student_assess, df_assess, df_labels = load_data('archive')
-    print(f"VLE rows: {len(df_vle)}, Students: {df_labels['id_student'].nunique()}")
-    print(df_labels['label'].value_counts())
+
+    grid = feature_engineering(df_vle, df_student_assess, df_assess, df_labels)
+    print("Feature grid shape:", grid.shape)
+    print(grid.head())
+
+    feature_cols = [
+        'interaction_volume', 'session_regularity', 'activity_diversity',
+        'days_since_last_login', 'procrastination_index'
+    ]
+    scaled = apply_leakage_free_scaling(grid, feature_cols)
+    print("\nScaled sample:")
+    print(scaled[[c + '_scaled' for c in feature_cols]].describe())
