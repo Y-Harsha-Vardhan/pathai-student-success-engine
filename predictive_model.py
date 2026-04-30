@@ -5,6 +5,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import precision_score, recall_score, f1_score, fbeta_score, roc_auc_score, confusion_matrix
 import xgboost as xgb
+import shap
 import os
 import warnings
 
@@ -251,8 +252,100 @@ def train_and_calibrate(df_features):
     return base_model, X_test, y_test, test_df, y_test_probs, best_thresh
 
 
-if __name__ == "__main__":
+def simulate_alert(student_data, probability, f2_thresh, shap_values, feature_names):
+    # dynamic 3-tier alert logic based on the optimized threshold:
+    #   < 80% of thresh      -> ignore
+    #   80% to 100% of thresh-> passive flag
+    #   > thresh             -> active alert with explanation
+    
+    passive_thresh = f2_thresh * 0.8
+
+    if probability < passive_thresh:
+        return "No Notification"
+    elif probability <= f2_thresh:
+        return "Passive Dashboard Flag - Monitor"
+
+    # map feature names to something more readable
+    translations = {
+        'total_interactions':   "overall interaction volume",
+        'unique_sites':         "variety of resources used",
+        'max_dormancy':         "long inactivity gap",
+        'engagement_slope':     "recent engagement trend",
+        'recent_minimums':      "activity in last two weeks",
+        'fh_sh_delta':          "drop in activity over time",
+        'studied_credits':      "academic workload",
+        'num_of_prev_attempts': "previous attempts",
+        'early_assess_count':   "early assessments submitted",
+    }
+
+    # pick top 3 contributing features for this student
+    local_top_idx = np.argsort(np.abs(shap_values))[::-1][:3]
+    reasons = []
+
+    for i in local_top_idx:
+        feat  = feature_names[i]
+        val   = student_data[feat]
+        s_val = shap_values[i]
+        desc  = translations.get(feat, feat.replace('_', ' '))
+
+        if feat == 'engagement_slope' and val < 0 and s_val > 0:
+            reasons.append("engagement dropped in recent weeks")
+        elif feat == 'max_dormancy' and s_val > 0:
+            reasons.append(f"long gap in activity (~{val:.0f} days)")
+        elif s_val > 0:
+            reasons.append(f"{desc} increased risk")
+        else:
+            reasons.append(f"{desc} slightly reduced risk but wasn't enough")
+
+    reason_str = "; ".join(reasons)
+    return f"Active Alert (Risk: {probability:.1%}) - {reason_str}"
+
+
+def explain_and_simulate(base_model, X_test, test_df, y_probs, f2_thresh):
+    # use base model for SHAP (calibrated wrapper hides tree structure)
+    print("Running SHAP analysis...")
+
+    explainer   = shap.TreeExplainer(base_model)
+    shap_values = explainer.shap_values(X_test)
+
+    feature_names  = X_test.columns.tolist()
+    mean_abs_shap  = np.abs(shap_values).mean(axis=0)
+    top_global_idx = np.argsort(mean_abs_shap)[::-1][:3]
+
+    print("Top 3 global features:")
+    for i in top_global_idx:
+        print(f"  {feature_names[i]}")
+
+    # sample a few students across risk levels
+    print("\n--- Alert Simulation ---")
+    
+    passive_thresh = f2_thresh * 0.8
+
+    high_risk_idx = np.where(y_probs > f2_thresh)[0]
+    med_risk_idx  = np.where((y_probs >= passive_thresh) & (y_probs <= f2_thresh))[0]
+    low_risk_idx  = np.where(y_probs < passive_thresh)[0]
+
+    sample_indices = []
+    if len(high_risk_idx) > 0: sample_indices.append(high_risk_idx[0])
+    if len(med_risk_idx)  > 0: sample_indices.append(med_risk_idx[0])
+    if len(low_risk_idx)  > 0: sample_indices.append(low_risk_idx[0])
+
+    for idx in sample_indices:
+        student_id   = test_df.iloc[idx]['id_student']
+        prob         = y_probs[idx]
+        student_data = X_test.iloc[idx]
+        s_vals       = shap_values[idx]
+
+        alert = simulate_alert(student_data, prob, f2_thresh, s_vals, feature_names)
+        print(f"Student {student_id} -> {alert}")
+        
+
+def main():
     df_info, df_vle, df_assess = load_and_prepare_data('archive')
     df_features = engineer_features(df_info, df_vle, df_assess)
     base_model, X_test, y_test, test_df, y_probs, f2_thresh = train_and_calibrate(df_features)
-    print(f"Best threshold carried forward: {f2_thresh:.3f}")
+    explain_and_simulate(base_model, X_test, test_df, y_probs, f2_thresh)
+
+
+if __name__ == "__main__":
+    main()
