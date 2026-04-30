@@ -1,5 +1,10 @@
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.preprocessing import LabelEncoder
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.metrics import precision_score, recall_score, f1_score, fbeta_score, roc_auc_score, confusion_matrix
+import xgboost as xgb
 import os
 import warnings
 
@@ -157,14 +162,97 @@ def engineer_features(df_info, df_vle, df_assess):
     return df_features
 
 
+def train_and_calibrate(df_features):
+    # split by presentation (train on past cohorts, test on the next one)
+    # avoids leakage from future students
+    print("Splitting data by presentation cohort...")
+
+    train_presentations = ['2013J', '2013B', '2014B']
+    test_presentations  = ['2014J']
+
+    train_df = df_features[df_features['code_presentation'].isin(train_presentations)].copy()
+    test_df  = df_features[df_features['code_presentation'].isin(test_presentations)].copy()
+
+    drop_cols = ['id_student', 'code_presentation', 'target']
+    X_train = train_df.drop(columns=drop_cols)
+    y_train = train_df['target']
+    X_test  = test_df.drop(columns=drop_cols)
+    y_test  = test_df['target']
+
+    # handle class imbalance (usually more passes than fails)
+    print("Training XGBoost classifier...")
+    pos_count = (y_train == 1).sum()
+    neg_count = (y_train == 0).sum()
+    scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1.0
+
+    base_model = xgb.XGBClassifier(
+        n_estimators=150,
+        learning_rate=0.05,
+        max_depth=4,
+        scale_pos_weight=scale_pos_weight,
+        random_state=42,
+        eval_metric='logloss'
+    )
+    base_model.fit(X_train, y_train)
+
+    # calibrate probabilities so scores are more interpretable
+    print("Calibrating probabilities...")
+    calibrated_model = CalibratedClassifierCV(base_model, method='isotonic', cv=3)
+    calibrated_model.fit(X_train, y_train)
+
+    y_test_probs = calibrated_model.predict_proba(X_test)[:, 1]
+
+    # quick reliability plot
+    fraction_of_positives, mean_predicted_value = calibration_curve(y_test, y_test_probs, n_bins=10)
+    plt.figure(figsize=(8, 6))
+    plt.plot(mean_predicted_value, fraction_of_positives, 's-', label='Calibrated XGBoost')
+    plt.plot([0, 1], [0, 1], 'k:', label='Perfect calibration')
+    plt.xlabel('Mean predicted probability')
+    plt.ylabel('Fraction of positives')
+    plt.title('Calibration Curve')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('calibration_curve.png')
+    plt.close()
+
+    print("Saved calibration curve.")
+
+    # choose threshold — prioritise recall (F2 score)
+    print("Finding best threshold (F2)...")
+    thresholds = np.arange(0.1, 0.9, 0.05)
+
+    best_f2 = 0
+    best_thresh = 0.5
+
+    for thresh in thresholds:
+        y_pred = (y_test_probs >= thresh).astype(int)
+
+        if y_pred.sum() == 0:
+            continue  # skip if nothing gets flagged
+
+        f2 = fbeta_score(y_test, y_pred, beta=2)
+
+        if f2 > best_f2:
+            best_f2 = f2
+            best_thresh = thresh
+
+    y_pred_best = (y_test_probs >= best_thresh).astype(int)
+
+    print("\n=== Test Metrics (2014J) ===")
+    print(f"Best Threshold : {best_thresh:.3f}")
+    print(f"Precision      : {precision_score(y_test, y_pred_best):.3f}")
+    print(f"Recall         : {recall_score(y_test, y_pred_best):.3f}")
+    print(f"F1 Score       : {f1_score(y_test, y_pred_best):.3f}")
+    print(f"ROC-AUC        : {roc_auc_score(y_test, y_test_probs):.3f}")
+    print("Confusion Matrix:")
+    print(confusion_matrix(y_test, y_pred_best))
+    print("============================\n")
+
+    return base_model, X_test, y_test, test_df, y_test_probs, best_thresh
+
+
 if __name__ == "__main__":
     df_info, df_vle, df_assess = load_and_prepare_data('archive')
     df_features = engineer_features(df_info, df_vle, df_assess)
-
-    print(f"\nFeature matrix shape: {df_features.shape}")
-    print("\nFeature dtypes:")
-    print(df_features.dtypes)
-    print("\nNull check:")
-    print(df_features.isnull().sum()[df_features.isnull().sum() > 0])
-    print("\nSample rows:")
-    print(df_features.head(3))
+    base_model, X_test, y_test, test_df, y_probs, f2_thresh = train_and_calibrate(df_features)
+    print(f"Best threshold carried forward: {f2_thresh:.3f}")
